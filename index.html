@@ -1,0 +1,850 @@
+<!-- 
+  OCT 视网膜图像智能诊断系统
+  功能：
+  1. 加载 TensorFlow.js 模型进行 OCT 图像分类
+  2. 生成 Occlusion Sensitivity 热力图以解释模型决策
+  3. 提供交互式 UI 调整热力图参数
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCT 视网膜智能诊断系统 (TensorFlow.js)</title>
+    <!-- 引入 TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --card-bg: #1e1e1e;
+            --text-primary: #e0e0e0;
+            --text-secondary: #a0a0a0;
+            --accent-color: #00bcd4;
+            --accent-hover: #00acc1;
+            --border-color: #333;
+            --success-color: #4caf50;
+            --warning-color: #ff9800;
+            --danger-color: #f44336;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        header {
+            background-color: var(--card-bg);
+            padding: 1rem 2rem;
+            border-bottom: 1px solid var(--border-color);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h1 { margin: 0; font-size: 1.5rem; color: var(--accent-color); }
+        .status { font-size: 0.9rem; color: var(--text-secondary); }
+        .status.ready { color: var(--success-color); }
+
+        main {
+            flex: 1;
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+            box-sizing: border-box;
+            transition: all 0.3s ease;
+        }
+
+        /* 上传区域 */
+        .upload-container {
+            border: 2px dashed var(--border-color);
+            border-radius: 12px;
+            padding: 4rem 2rem;
+            text-align: center;
+            background-color: var(--card-bg);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 2rem;
+        }
+
+        .upload-container:hover, .upload-container.drag-over {
+            border-color: var(--accent-color);
+            background-color: rgba(0, 188, 212, 0.05);
+        }
+
+        .upload-icon { font-size: 3rem; margin-bottom: 1rem; color: var(--text-secondary); }
+        .upload-text { font-size: 1.2rem; color: var(--text-primary); margin-bottom: 0.5rem; }
+        .upload-subtext { font-size: 0.9rem; color: var(--text-secondary); }
+        
+        #file-input { display: none; }
+
+        /* 结果网格布局 */
+        .results-grid {
+            display: none; /* 初始隐藏 */
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: auto auto;
+            gap: 1.5rem;
+            height: 100%;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border: 1px solid var(--border-color);
+        }
+
+        h2 { margin-top: 0; margin-bottom: 1rem; font-size: 1.1rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; color: var(--accent-color); }
+
+        /* 图像展示区 (左上) */
+        .image-view-card {
+            grid-column: 1 / 2;
+            grid-row: 1 / 2;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+            min-height: 300px;
+            justify-content: center;
+        }
+
+        .image-wrapper {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+        }
+
+        #preview-image {
+            max-width: 100%;
+            max-height: 400px;
+            display: block;
+            border-radius: 4px;
+        }
+
+        #heatmap-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* 允许点击穿透 */
+            border-radius: 4px;
+        }
+
+        /* 概率展示区 (左下) */
+        .prob-card {
+            grid-column: 1 / 2;
+            grid-row: 2 / 3;
+        }
+
+        .prob-bar-container {
+            margin-bottom: 0.8rem;
+        }
+
+        .prob-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.2rem;
+            font-size: 0.9rem;
+        }
+
+        .prob-bar-bg {
+            height: 8px;
+            background-color: #333;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .prob-bar-fill {
+            height: 100%;
+            background-color: var(--accent-color);
+            width: 0%;
+            transition: width 0.5s ease-out;
+        }
+
+        /* 热力图控制区 (右上) */
+        .heatmap-controls-card {
+            grid-column: 2 / 3;
+            grid-row: 1 / 2;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .heatmap-legend-container {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding: 0.5rem;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+        }
+        
+        .heatmap-legend-gradient {
+            width: 20px;
+            height: 100px;
+            background: linear-gradient(to bottom, red, yellow, transparent);
+            margin-right: 10px;
+            border-radius: 2px;
+        }
+
+        .heatmap-legend-labels {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 100px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .control-group { margin-bottom: 1rem; }
+        .control-group label { display: block; margin-bottom: 0.3rem; font-size: 0.9rem; }
+        .control-group input[type="range"] { width: 100%; cursor: pointer; }
+        .control-value { float: right; color: var(--accent-color); font-family: monospace; }
+
+        .btn {
+            background-color: var(--accent-color);
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.2s;
+            width: 100%;
+            margin-top: auto;
+        }
+        .btn:hover { background-color: var(--accent-hover); }
+        .btn:disabled { background-color: #555; cursor: not-allowed; }
+
+        .debug-info {
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 1rem;
+            background: rgba(0,0,0,0.2);
+            padding: 0.5rem;
+            border-radius: 4px;
+        }
+
+        /* 诊断结果 (右下) */
+        .diagnosis-card {
+            grid-column: 2 / 3;
+            grid-row: 2 / 3;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        .diagnosis-result { font-size: 2rem; font-weight: bold; color: var(--accent-color); margin-bottom: 0.5rem; }
+        .diagnosis-conf { font-size: 1.1rem; color: var(--text-secondary); }
+
+        /* Loading Overlay */
+        #loading-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            z-index: 1000;
+            display: none;
+        }
+        .spinner {
+            width: 50px; height: 50px;
+            border: 5px solid var(--text-secondary);
+            border-top: 5px solid var(--accent-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 1rem;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 布局状态切换 */
+        .layout-initial .upload-container {
+            max-width: 600px;
+            margin: 4rem auto;
+        }
+        
+        .layout-analyzed .upload-container {
+            display: none; /* 分析后隐藏大的上传框，可以通过页面底部的按钮重新上传 */
+        }
+        
+        .layout-analyzed .results-grid {
+            display: grid;
+        }
+
+        .reupload-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            display: none;
+        }
+    </style>
+</head>
+<body class="layout-initial">
+
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <div id="loading-text">加载模型中...</div>
+</div>
+
+<header>
+    <h1>OCT 视网膜智能诊断</h1>
+    <div class="status" id="model-status">正在初始化...</div>
+</header>
+
+<main>
+    <!-- 上传区 -->
+    <div class="upload-container" id="drop-zone">
+        <div class="upload-icon">📁</div>
+        <div class="upload-text">点击或拖拽 OCT 图像到此处</div>
+        <div class="upload-subtext">支持 PNG, JPG, JPEG</div>
+        <input type="file" id="file-input" accept="image/*">
+    </div>
+
+    <!-- 结果展示区 -->
+    <div class="results-grid">
+        <!-- 图像与热力图 -->
+        <div class="card image-view-card">
+            <h2>原始图像与热力图</h2>
+            <div class="image-wrapper">
+                <img id="preview-image" alt="Preview">
+                <canvas id="heatmap-canvas"></canvas>
+            </div>
+        </div>
+
+        <!-- 热力图控制 -->
+        <div class="card heatmap-controls-card">
+            <h2>可解释性分析 (Occlusion Sensitivity)</h2>
+            <div style="flex: 1;">
+                <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                    红色区域表示对模型判断为当前类别最关键的区域（遮挡后置信度下降最大）。
+                </p>
+                
+                <div class="heatmap-legend-container">
+                    <div class="heatmap-legend-gradient"></div>
+                    <div class="heatmap-legend-labels">
+                        <span>高重要性</span>
+                        <span>中重要性</span>
+                        <span>低重要性</span>
+                    </div>
+                    <div style="flex:1; margin-left: 1rem;">
+                         <div class="debug-info" id="heatmap-debug">
+                            等待生成...
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>遮挡块大小 (Patch Size) <span class="control-value" id="val-patch">16</span></label>
+                    <input type="range" id="param-patch" min="8" max="48" step="4" value="16">
+                </div>
+                <div class="control-group">
+                    <label>扫描步长 (Stride) <span class="control-value" id="val-stride">8</span></label>
+                    <input type="range" id="param-stride" min="4" max="24" step="4" value="8">
+                </div>
+                <div class="control-group">
+                    <label>热力图透明度 <span class="control-value" id="val-opacity">0.6</span></label>
+                    <input type="range" id="param-opacity" min="0" max="1" step="0.1" value="0.6">
+                </div>
+            </div>
+            <button class="btn" id="btn-analyze" disabled>生成/更新热力图</button>
+        </div>
+
+        <!-- 概率分布 -->
+        <div class="card prob-card">
+            <h2>预测概率分布</h2>
+            <div id="prob-bars">
+                <!-- 动态生成 -->
+            </div>
+        </div>
+
+        <!-- 诊断结论 -->
+        <div class="card diagnosis-card">
+            <h2>AI 诊断建议</h2>
+            <div class="diagnosis-result" id="final-result">--</div>
+            <div class="diagnosis-conf" id="final-conf">置信度: --%</div>
+        </div>
+    </div>
+</main>
+
+<button class="reupload-btn" id="btn-reupload">上传新图片</button>
+
+<script>
+    // 配置
+    const CONFIG = {
+        modelUrl: './model.json',
+        labels: ['DME', 'DRUSEN', 'NORMAL', 'CNV'], // 对应 dict.txt: 1-DME, 2-DRUSEN, 3-NORMAL, 4-CNV
+        inputSize: 224
+    };
+
+    // 全局状态
+    let model = null;
+    let currentImageElement = null; // HTMLImageElement
+    let currentTensor = null;       // 预处理后的 tensor [1, 224, 224, 3]
+    let currentPrediction = null;   // { index, label, confidence, allProbs }
+    let isAnalyzing = false;
+
+    // DOM 元素
+    const els = {
+        dropZone: document.getElementById('drop-zone'),
+        fileInput: document.getElementById('file-input'),
+        previewImg: document.getElementById('preview-image'),
+        heatmapCanvas: document.getElementById('heatmap-canvas'),
+        status: document.getElementById('model-status'),
+        body: document.body,
+        loadingOverlay: document.getElementById('loading-overlay'),
+        loadingText: document.getElementById('loading-text'),
+        probBars: document.getElementById('prob-bars'),
+        finalResult: document.getElementById('final-result'),
+        finalConf: document.getElementById('final-conf'),
+        btnAnalyze: document.getElementById('btn-analyze'),
+        btnReupload: document.getElementById('btn-reupload'),
+        heatmapDebug: document.getElementById('heatmap-debug'),
+        params: {
+            patch: document.getElementById('param-patch'),
+            stride: document.getElementById('param-stride'),
+            opacity: document.getElementById('param-opacity')
+        },
+        vals: {
+            patch: document.getElementById('val-patch'),
+            stride: document.getElementById('val-stride'),
+            opacity: document.getElementById('val-opacity')
+        }
+    };
+
+    // --- 初始化 ---
+
+    async function init() {
+        showLoading('加载模型中...');
+        try {
+            // 加载模型
+            model = await tf.loadGraphModel(CONFIG.modelUrl);
+            
+            // 预热模型 (Warmup)
+            const zeros = tf.zeros([1, CONFIG.inputSize, CONFIG.inputSize, 3]);
+            model.predict(zeros).dispose();
+            zeros.dispose();
+
+            els.status.textContent = '模型就绪';
+            els.status.classList.add('ready');
+            hideLoading();
+            console.log('Model loaded');
+        } catch (error) {
+            console.error(error);
+            els.status.textContent = '模型加载失败: ' + error.message;
+            els.status.style.color = 'var(--danger-color)';
+            hideLoading();
+            alert('无法加载模型 model.json，请确保文件位于当前目录。');
+        }
+
+        setupEventListeners();
+    }
+
+    function setupEventListeners() {
+        // 文件上传交互
+        els.dropZone.addEventListener('click', () => els.fileInput.click());
+        els.fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+        
+        els.dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            els.dropZone.classList.add('drag-over');
+        });
+        els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('drag-over'));
+        els.dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            els.dropZone.classList.remove('drag-over');
+            handleFiles(e.dataTransfer.files);
+        });
+
+        // 重新上传
+        els.btnReupload.addEventListener('click', () => {
+            els.body.classList.remove('layout-analyzed');
+            els.body.classList.add('layout-initial');
+            els.btnReupload.style.display = 'none';
+            els.fileInput.value = '';
+            // 清理
+            clearResults();
+        });
+
+        // 热力图参数控制
+        Object.keys(els.params).forEach(key => {
+            els.params[key].addEventListener('input', (e) => {
+                els.vals[key].textContent = e.target.value;
+            });
+        });
+        
+        // 仅修改透明度时不需要重新计算，只需要重绘
+        els.params.opacity.addEventListener('change', () => {
+            if (window.lastHeatmapData) drawHeatmap(window.lastHeatmapData);
+        });
+
+        els.btnAnalyze.addEventListener('click', () => {
+            if (isAnalyzing) return;
+            generateOcclusionHeatmap();
+        });
+    }
+
+    // --- 核心逻辑 ---
+
+    function handleFiles(files) {
+        if (files.length === 0) return;
+        const file = files[0];
+        if (!file.type.startsWith('image/')) {
+            alert('请上传图片文件');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const img = new Image();
+            img.onload = () => {
+                currentImageElement = img;
+                runPredictionPipeline();
+            };
+            img.src = e.target.result;
+            els.previewImg.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+    }
+
+    async function runPredictionPipeline() {
+        if (!model) return;
+        
+        // UI 切换
+        els.body.classList.remove('layout-initial');
+        els.body.classList.add('layout-analyzed');
+        els.btnReupload.style.display = 'block';
+        showLoading('正在诊断...');
+        clearResults();
+
+        // 1. 预处理
+        const tensor = tf.tidy(() => {
+            return tf.browser.fromPixels(currentImageElement)
+                .resizeNearestNeighbor([CONFIG.inputSize, CONFIG.inputSize])
+                .toFloat()
+                .div(tf.scalar(255))
+                .expandDims();
+        });
+        currentTensor = tensor; // 保存引用用于热力图分析
+
+        // 2. 推理
+        const startTime = performance.now();
+        const predictions = await model.predict(tensor).data();
+        const endTime = performance.now();
+        console.log(`Inference time: ${(endTime - startTime).toFixed(2)}ms`);
+
+        // 3. 解析结果
+        const result = Array.from(predictions).map((prob, i) => ({
+            prob: prob,
+            label: CONFIG.labels[i],
+            index: i
+        })).sort((a, b) => b.prob - a.prob);
+
+        currentPrediction = result[0];
+        
+        // 4. 更新 UI
+        updateResultsUI(result);
+        
+        // 5. 自动生成一次默认参数的热力图 (稍作延迟以先显示结果)
+        hideLoading();
+        setTimeout(() => {
+            generateOcclusionHeatmap();
+        }, 500);
+    }
+
+    function updateResultsUI(sortedResults) {
+        // 概率条形图
+        els.probBars.innerHTML = '';
+        sortedResults.forEach(item => {
+            const div = document.createElement('div');
+            div.className = 'prob-bar-container';
+            const percentage = (item.prob * 100).toFixed(1) + '%';
+            div.innerHTML = `
+                <div class="prob-label">
+                    <span>${item.label}</span>
+                    <span>${percentage}</span>
+                </div>
+                <div class="prob-bar-bg">
+                    <div class="prob-bar-fill" style="width: ${percentage}"></div>
+                </div>
+            `;
+            els.probBars.appendChild(div);
+        });
+
+        // 最终诊断
+        const best = sortedResults[0];
+        els.finalResult.textContent = best.label;
+        els.finalConf.textContent = `置信度: ${(best.prob * 100).toFixed(2)}%`;
+        
+        // 如果置信度低，标记颜色
+        if (best.prob < 0.6) {
+            els.finalResult.style.color = 'var(--warning-color)';
+        } else {
+            els.finalResult.style.color = 'var(--accent-color)';
+        }
+
+        // 启用分析按钮
+        els.btnAnalyze.disabled = false;
+    }
+
+    function clearResults() {
+        const ctx = els.heatmapCanvas.getContext('2d');
+        ctx.clearRect(0, 0, els.heatmapCanvas.width, els.heatmapCanvas.height);
+        window.lastHeatmapData = null;
+        if (currentTensor) {
+            // 注意：这里我们不dispose currentTensor，因为热力图分析还需要它
+            // 只有在加载新图时才彻底替换
+        }
+    }
+
+    // --- Occlusion Sensitivity 算法 ---
+
+    async function generateOcclusionHeatmap() {
+        if (!model || !currentTensor || !currentPrediction) return;
+
+        isAnalyzing = true;
+        els.btnAnalyze.disabled = true;
+        els.btnAnalyze.textContent = '生成中...';
+        els.heatmapDebug.textContent = '计算中...';
+        
+        // 获取参数
+        const patchSize = parseInt(els.params.patch.value);
+        const stride = parseInt(els.params.stride.value);
+        const targetClassIndex = currentPrediction.index;
+        const baselineConf = currentPrediction.prob;
+
+        // 异步执行以不阻塞 UI
+        setTimeout(async () => {
+            try {
+                // 1. 准备数据
+                const width = CONFIG.inputSize;
+                const height = CONFIG.inputSize;
+                const heatmapW = Math.floor((width - patchSize) / stride) + 1;
+                const heatmapH = Math.floor((height - patchSize) / stride) + 1;
+                
+                // 存储每个位置的置信度下降值
+                const sensitivityMap = new Float32Array(heatmapW * heatmapH);
+                
+                // 获取图像原始数据用于遮挡操作
+                // currentTensor 是 GPU tensor, 下载到 CPU
+                const originalData = await currentTensor.squeeze().array(); // [224, 224, 3]
+
+                let maxDrop = 0;
+                let minDrop = 0;
+                let totalDrop = 0;
+
+                // 2. 循环遍历图像
+                // 优化：我们可以构建一个 batch 一次预测多个，但为了代码简单和显存安全，这里逐个或小批量预测
+                // 考虑到浏览器环境，我们逐个预测，但为了速度，每行作为一个 batch？
+                // 简单起见，逐个预测，但用 tf.tidy 及时清理
+                
+                let count = 0;
+                for (let y = 0; y < heatmapH; y++) {
+                    for (let x = 0; x < heatmapW; x++) {
+                        const startX = x * stride;
+                        const startY = y * stride;
+                        
+                        // 创建遮挡后的图像张量
+                        const conf = tf.tidy(() => {
+                            // 复制一份数据 (这是比较耗时的，但在 JS 中修改 Array 比操作 Tensor 容易理解)
+                            // 更快的方法是使用 tf.buffer 或 mask，但这里为了逻辑清晰使用 buffer
+                            const buffer = tf.buffer([1, height, width, 3]);
+                            
+                            // 这一步拷贝非常慢，优化策略：只在 GPU 上操作
+                            // 更好的 GPU 操作：创建一个 mask tensor，然后 image * mask + gray * (1-mask)
+                            // 让我们尝试 GPU 方法
+                            
+                            // 创建 mask: 全 1
+                            const maskBuffer = tf.buffer([height, width, 3]);
+                            for(let i=0; i<height; i++) {
+                                for(let j=0; j<width; j++) {
+                                    // 默认保留原图
+                                    maskBuffer.set(1, i, j, 0);
+                                    maskBuffer.set(1, i, j, 1);
+                                    maskBuffer.set(1, i, j, 2);
+                                }
+                            }
+                            
+                            // 将遮挡区域设为 0
+                            for(let i=startY; i<startY+patchSize; i++) {
+                                for(let j=startX; j<startX+patchSize; j++) {
+                                    if(i<height && j<width) {
+                                        maskBuffer.set(0, i, j, 0);
+                                        maskBuffer.set(0, i, j, 1);
+                                        maskBuffer.set(0, i, j, 2);
+                                    }
+                                }
+                            }
+                            const mask = maskBuffer.toTensor().expandDims(0); // [1, 224, 224, 3]
+                            
+                            // 遮挡图像 = 原图 * mask + 灰色(0.5) * (1-mask)
+                            const gray = tf.scalar(0.5);
+                            const maskedImage = currentTensor.mul(mask).add(gray.mul(tf.scalar(1).sub(mask)));
+                            
+                            const pred = model.predict(maskedImage);
+                            const res = pred.dataSync(); // 同步获取结果
+                            return res[targetClassIndex];
+                        });
+
+                        // 计算敏感度：基准 - 遮挡后
+                        // 如果遮挡后置信度大幅下降 (值变小)，diff 为正大值 -> 重要区域
+                        const diff = baselineConf - conf;
+                        sensitivityMap[y * heatmapW + x] = diff;
+                        
+                        if (diff > maxDrop) maxDrop = diff;
+                        if (diff < minDrop) minDrop = diff;
+                        totalDrop += diff;
+                        
+                        count++;
+                    }
+                    // 每处理完一行，让出主线程一会，更新进度
+                    if (y % 2 === 0) await new Promise(r => setTimeout(r, 0));
+                }
+
+                const avgDrop = totalDrop / count;
+
+                // 3. 处理热力图数据
+                // 归一化到 0-1 (只关注正向贡献，即 diff > 0 的部分)
+                // 我们主要关心正值（置信度下降），负值意味着遮挡后置信度反而上升（说明该区域是干扰项），暂时忽略或设为0
+                const normalizedMap = new Float32Array(sensitivityMap.length);
+                for (let i = 0; i < sensitivityMap.length; i++) {
+                    // ReLU: 只看正值
+                    let val = Math.max(0, sensitivityMap[i]);
+                    // 归一化
+                    if (maxDrop > 0) {
+                        normalizedMap[i] = val / maxDrop;
+                    } else {
+                        normalizedMap[i] = 0;
+                    }
+                }
+
+                // 保存数据以便调整透明度时重绘
+                const heatmapData = {
+                    map: normalizedMap,
+                    w: heatmapW,
+                    h: heatmapH,
+                    maxDrop,
+                    avgDrop,
+                    baselineConf
+                };
+                window.lastHeatmapData = heatmapData;
+
+                drawHeatmap(heatmapData);
+
+                // 更新调试信息
+                els.heatmapDebug.innerHTML = `
+                    基准置信度: ${(baselineConf*100).toFixed(1)}%<br>
+                    最大下降: ${(maxDrop*100).toFixed(1)}%<br>
+                    平均下降: ${(avgDrop*100).toFixed(2)}%
+                `;
+
+            } catch (err) {
+                console.error('Heatmap generation failed', err);
+                els.heatmapDebug.textContent = '生成失败';
+            } finally {
+                isAnalyzing = false;
+                els.btnAnalyze.disabled = false;
+                els.btnAnalyze.textContent = '生成/更新热力图';
+            }
+        }, 50); // initial delay
+    }
+
+    function drawHeatmap(data) {
+        const canvas = els.heatmapCanvas;
+        const ctx = canvas.getContext('2d');
+        const img = els.previewImg;
+        
+        // 匹配显示尺寸
+        canvas.width = img.clientWidth;
+        canvas.height = img.clientHeight;
+
+        // 清空
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // 创建离屏 canvas 绘制小热力图
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = data.w;
+        offCanvas.height = data.h;
+        const offCtx = offCanvas.getContext('2d');
+        
+        // 绘制像素
+        const imgData = offCtx.createImageData(data.w, data.h);
+        const pixels = imgData.data;
+        const opacity = parseFloat(els.params.opacity.value);
+
+        for (let i = 0; i < data.map.length; i++) {
+            const val = data.map[i]; // 0-1
+            // 简单的热力图颜色映射：透明 -> 红
+            // 值越大越红
+            // R: 255, G: 255 * (1-val), B: 0
+            // 实际上为了好看，可以使用 Jet 或 Turbo 伪彩色，这里简化为红色透明度
+            
+            // 策略：高重要性为红色，低重要性透明
+            // 我们可以用类似 HSV 转 RGB 的方式，或者简单的 Red gradient
+            
+            // 红色通道满，绿色通道随值减小 (1->黄色, 0->红色) - 这种更好看
+            // 但标准热力图通常是: 低->蓝/透明, 中->黄, 高->红
+            // 这里我们用: 0->透明, 0.5->黄, 1.0->红
+            
+            let r, g, b, a;
+            
+            if (val < 0.1) {
+                // 忽略低影响区域
+                r=0; g=0; b=0; a=0;
+            } else {
+                r = 255;
+                g = Math.floor(255 * (1 - val)); // val=1 -> g=0 (红), val=0 -> g=255 (黄/白)
+                b = 0;
+                a = Math.floor(255 * opacity * Math.min(1, val * 1.5)); // 增强一点可见性
+            }
+
+            const pIndex = i * 4;
+            pixels[pIndex] = r;
+            pixels[pIndex + 1] = g;
+            pixels[pIndex + 2] = b;
+            pixels[pIndex + 3] = a;
+        }
+        
+        offCtx.putImageData(imgData, 0, 0);
+
+        // 将小热力图拉伸绘制到大 Canvas (自动双线性插值实现平滑)
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(offCanvas, 0, 0, canvas.width, canvas.height);
+    }
+
+    // --- Helper ---
+
+    function showLoading(text) {
+        els.loadingText.textContent = text;
+        els.loadingOverlay.style.display = 'flex';
+    }
+
+    function hideLoading() {
+        els.loadingOverlay.style.display = 'none';
+    }
+
+    // 启动
+    init();
+
+</script>
+</body>
+</html>
